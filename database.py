@@ -1,16 +1,15 @@
 import streamlit as st
 from streamlit_searchbox import st_searchbox
-# Стабильный и проверенный импорт из официального плагина:
-from strikers_gsheets_connection import GSheetsConnection if False else None
-try:
-    from st_gsheets_connection import GSheetsConnection
-except ImportError:
-    from streamlit.connections import GSheetsConnection
-
 import pandas as pd
 import json
 import os
 import time
+
+# Правильный и чистый импорт коннектора таблиц
+try:
+    from st_gsheets_connection import GSheetsConnection
+except ImportError:
+    from streamlit.connections import GSheetsConnection
 
 DB_CONN = st.connection("gsheets", type=GSheetsConnection)
 SHEET_URL = st.secrets["SPREADSHEET_URL"]
