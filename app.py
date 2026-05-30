@@ -1,572 +1,388 @@
 import streamlit as st
-import time
-import json
-import random
-import os
-import dadata_geo as geo
-import parser_simple as parser
 import database as db
-import game_engine as engine
+import dadata_geo as geo
+import pandas as pd
+import json
+import time
 
-VERSION = "1.0.0"
+# Настройка страницы
+st.set_page_config(page_title="Винное Казино", page_icon="🍷", layout="centered")
 
-st.set_page_config(page_title="Wine Casino Платформа", page_icon="🍷", layout="wide")
+# --- ГЛОБАЛЬНЫЕ СПРАВОЧНИКИ (ПРАВКА 9) ---
+ALL_COUNTRIES = ["Россия", "Франция", "Италия", "Испания", "Германия", "Новая Зеландия", "Чили", "Аргентина", "США", "ЮАР", "Австрия", "Португалия"]
+ALL_GRAPES = ["Шардоне", "Совиньон Блан", "Рислинг", "Пино Гриджо", "Гевюрцтраминер", "Каберне Совиньон", "Мерло", "Пино Нуар", "Шираз / Сира", "Мальбек", "Темпранильо", "Санджовезе"]
 
-# --- СТИЛИЗАЦИЯ ИЗ ВЕРСИИ С АНИМАЦИЕЙ ---
-try:
-    with open("background.png", "rb") as img_file:
-        import base64
-        encoded_string = base64.b64encode(img_file.read()).decode()
-    st.markdown(f"""<style>
-    @keyframes luxuryMovement {{ 0% {{background-position:0% 50%}} 50% {{background-position:100% 50%}} 100% {{background-position:0% 50%}} }}
-    .stApp {{
-        background-image: linear-gradient(135deg, rgba(141, 29, 67, 0.8) 0%, rgba(42, 4, 17, 0.95) 100%), url("data:image/png;base64,{encoded_string}");
-        background-size: 130% 130%; background-attachment: fixed; animation: luxuryMovement 12s ease-in-out infinite; color: #ffffff !important;
-    }}
-    h1, h2, h3, h4, h5, h6, p, span, label, th, td {{ color: #ffffff !important; font-weight: 500 !important; text-shadow: 1px 1px 3px rgba(0,0,0,0.6) !important; }}
-    div.stForm, .streamlit-expanderHeader, .streamlit-expanderContent {{ background-color: rgba(30, 4, 12, 0.75) !important; border: 1px solid rgba(255,255,255,0.15) !important; border-radius: 12px !important; }}
-    div[data-baseweb="select"] div, div[data-baseweb="input"] div, div[data-baseweb="base-input"] {{ background-color: #ffffff !important; border-radius: 8px !important; }}
-    div[data-baseweb="select"] *, div[data-baseweb="input"] *, div[data-baseweb="base-input"] * {{ color: #1a1a1a !important; font-weight: 600 !important; text-shadow: none !important; }}
-    .stButton button[type="primary"] {{ background-color: #d4af37 !important; color: #1a1a1a !important; font-weight:600; border: none !important; }}
-    </style>""", unsafe_allow_html=True)
-except: pass
-
-# --- ИНИЦИАЛИЗАЦИЯ СЕССИИ СИСТЕМЫ ---
-if "page" not in st.session_state:
-    st.session_state.page = "login"
+# --- ИНИЦИАЛИЗАЦИЯ СЕССИИ (ПРАВКА 16) ---
+if "authenticated" not in st.session_state:
+    st.session_state.authenticated = False
+if "user_phone" not in st.session_state:
     st.session_state.user_phone = None
-    st.session_state.user_fio = None
-    st.session_state.game_id = None
-    st.session_state.players = []
-    st.session_state.round_num = 1
-    st.session_state.current_wine = {}
-    st.session_state.rounds_history = [] # Список завершенных раундов [{"wine": {}, "bets": {}}]
-    st.session_state.game_setup = {}
-    st.session_state.active_params = ["Страна", "Сорт винограда"]
+if "logout_confirm" not in st.session_state:
+    st.session_state.logout_confirm = False
+if "page" not in st.session_state:
+    st.session_state.page = "main_menu"
 
-# --- КУКИ / ЗАПОМНИТЬ МЕНЯ (3 МЕСЯЦА) ЧЕРЕЗ JAVASCRIPT ---
-st.components.v1.html(f"""
-<script>
-    const token = localStorage.getItem("wine_casino_login_token");
-    const fio = localStorage.getItem("wine_casino_login_fio");
-    if (token && !window.parent.location.href.includes("loaded=true")) {{
-        window.parent.postMessage({{type: "COOKIE_AUTH", phone: token, fio: fio}}, "*");
-    }}
-</script>
-""", height=0)
+# Проверка авто-входа (Запомнить меня)
+if not st.session_state.authenticated and "remember_me_user" in st.session_state:
+    st.session_state.authenticated = True
+    st.session_state.user_phone = st.session_state.remember_me_user
 
-# Прием сообщения от JS из localStorage
-import types
-if "cookie_checked" not in st.session_state:
-    st.session_state.cookie_checked = True
-    # Потоковый хак прослушивания событий Streamlit
-    # Если данные есть в localStorage, авторизуем автоматически
-
-# --- ЭКРАН ТЕХПОДДЕРЖКИ (ОКНО РАЗРАБОТЧИКА) ---
-@st.dialog("Связаться с разработчиком 🛠️")
-def show_developer_dialog():
-    st.markdown("### Винотека & Автоматизация")
-    st.markdown("**Разработчик:** Никита — кавист")
-    st.markdown("📍 *Wine & Whiskey by Simple, г. Оренбург, Северный проезд 27А*")
-    st.markdown("---")
-    st.markdown("💬 **Telegram:** [@lollybye](https://t.me/lollybye)")
-    st.markdown("📞 **Телефон:** +79228050062")
-    st.markdown("---")
-    st.markdown("💳 **Поддержка проекта и донаты (Сбербанк):**")
-    st.code("2200 7013 1092 3161", language="text")
-    st.success("Пишите по поводу любых багов, ошибок интерфейса, идей и предложений!")
-
-def draw_header():
-    c1, c2 = st.columns([4, 1])
-    with c1:
-        st.markdown(f"### 🍷 Платформа «Винное Казино» <span style='font-size:0.8rem;color:gray;'>v{VERSION}</span>", unsafe_allow_html=True)
-    with c2:
-        if st.session_state.user_phone:
-            if st.button("Выйти 🚪", use_container_width=True):
-                db.clear_local_backup()
-                st.session_state.clear()
-                st.markdown("<script>localStorage.clear();</script>", unsafe_allow_html=True)
-                st.rerun()
-
-# ==========================================
-# 1. СТРАНИЦА: ЛОГИН И РЕГИСТРАЦИЯ
-# ==========================================
-if st.session_state.page == "login":
-    draw_header()
-    tab1, tab2 = st.tabs(["🔐 Вход", "📝 Создать аккаунт"])
+# --- ОКНО АВТОРИЗАЦИИ ---
+if not st.session_state.authenticated:
+    st.title("🍷 Винное Казино")
+    tab1, tab2 = st.tabs(["Вход", "Регистрация"])
     
     with tab1:
-        with st.form("login_form"):
-            phone = st.text_input("Номер телефона (Логин):")
-            password = st.text_input("Пароль:", type="password")
-            remember = st.checkbox("Запомнить меня на 3 месяца")
-            
-            if st.form_submit_button("Войти ➔", use_container_width=True, type="primary"):
-                # Проверка на мастер-аккаунт
-                if phone == st.secrets["MASTER_USER"] and password == st.secrets["MASTER_PASSWORD"]:
-                    st.session_state.user_phone = "LOLLYBYE"
-                    st.session_state.user_fio = "Разработчик Никита"
-                    st.session_state.page = "main_menu"
-                    st.rerun()
-                
-                df = db.load_users()
-                user = df[(df["phone"].astype(str) == phone.strip()) & (df["password"].astype(str) == password.strip())]
-                if not user.empty:
-                    st.session_state.user_phone = phone.strip()
-                    st.session_state.user_fio = user.iloc[0]["fio"]
-                    if remember:
-                        st.markdown(f"<script>localStorage.setItem('wine_casino_login_token', '{phone.strip()}'); localStorage.setItem('wine_casino_login_fio', '{user.iloc[0]['fio']}');</script>", unsafe_allow_html=True)
-                    db.load_local_backup() # Восстанавливаем игру, если она была свернута
-                    st.session_state.page = "main_menu"
-                    st.rerun()
-                else:
-                    st.error("Неверный логин или пароль")
-                    
-    with tab2:
-        st.warning("⚠️ Пожалуйста, запишите или запомните пароль! Восстановление данных в этой версии пока невозможно.")
-        with st.form("reg_form"):
-            fio = st.text_input("Ваше ФИО:")
-            new_phone = st.text_input("Номер телефона:")
-            new_password = st.text_input("Придумайте пароль:", type="password")
-            
-            if st.form_submit_button("Зарегистрироваться", use_container_width=True):
-                if fio.strip() and new_phone.strip() and new_password.strip():
-                    if db.save_user(fio.strip(), new_phone.strip(), new_password.strip()):
-                        st.success("Успешная регистрация! Переключитесь на вкладку Вход.")
-                    else:
-                        st.error("Пользователь с таким телефоном уже зарегистрирован!")
-                else:
-                    st.error("Заполните все поля!")
-
-# ==========================================
-# 2. СТРАНИЦА: ГЛАВНОЕ МЕНЮ
-# ==========================================
-elif st.session_state.page == "main_menu":
-    draw_header()
-    st.markdown(f"## Добро пожаловать, {st.session_state.user_fio}! 👋")
-    
-    col1, col2 = st.columns([1, 2])
-    with col1:
-        if st.button("🍷 Начать новую игру", use_container_width=True, type="primary"):
-            st.session_state.game_id = f"g_{st.session_state.user_phone}_{int(time.time())}"
-            st.session_state.players = []
-            st.session_state.round_num = 1
-            st.session_state.rounds_history = []
-            st.session_state.current_wine = {}
-            st.session_state.page = "game_setup_venue"
-            db.save_local_backup()
-            st.rerun()
-            
-        if st.button("🛠️ Связаться с разработчиком", use_container_width=True):
-            show_developer_dialog()
-            
-        if st.session_state.user_phone == "LOLLYBYE":
-            st.markdown("---")
-            if st.button("👑 ВХОД В МАСТЕР-ПАНЕЛЬ", use_container_width=True):
-                st.session_state.page = "master_panel"
+        login_phone = st.text_input("Номер телефона", key="log_phone")
+        login_pass = st.text_input("Пароль", type="password", key="log_pass")
+        remember = st.checkbox("Запомнить меня", key="remember_chk") # ПРАВКА 1
+        
+        if st.button("Войти", use_container_width=True):
+            if login_phone == st.secrets["MASTER_USER"] and login_pass == st.secrets["MASTER_PASSWORD"]:
+                st.session_state.authenticated = True
+                st.session_state.user_phone = login_phone
+                if remember: st.session_state.remember_me_user = login_phone
                 st.rerun()
                 
-    with col2:
-        st.markdown("### 📜 История ваших игр")
-        all_games = db.load_all_games()
-        if not all_games.empty:
-            my_games = all_games[all_games["phone"] == st.session_state.user_phone]
-            if not my_games.empty:
-                for _, g in my_games.iterrows():
-                    with st.expander(f"📅 {g['date']} | 📍 {g['venue']} | Победитель: {g['winner']}"):
-                        try:
-                            g_details = json.loads(g["full_json"])
-                            st.json(g_details)
-                        except: st.write("Нет детальных данных.")
-            else: st.info("Вы пока не провели ни одной игры.")
-        else: st.info("История игр пуста.")
+            users = db.load_users()
+            if not users.empty and str(login_phone) in users["phone"].astype(str).values:
+                user_row = users[users["phone"].astype(str) == str(login_phone)].iloc[0]
+                if str(user_row["password"]) == str(login_pass):
+                    st.session_state.authenticated = True
+                    st.session_state.user_phone = str(login_phone)
+                    if remember: st.session_state.remember_me_user = str(login_phone)
+                    st.rerun()
+                else:
+                    st.error("Неверный пароль")
+            else:
+                st.error("Пользователь не найден")
+                
+    with tab2:
+        reg_fio = st.text_input("ФИО Ведущего")
+        reg_phone = st.text_input("Номер телефона (формат 79xxxxxxxxx)")
+        reg_pass = st.text_input("Создайте пароль", type="password")
+        if st.button("Зарегистрироваться", use_container_width=True):
+            if reg_fio and reg_phone and reg_pass:
+                if db.save_user(reg_fio, reg_phone, reg_pass):
+                    st.success("Регистрация успешна! Теперь войдите.")
+                else:
+                    st.error("Пользователь с таким телефоном уже есть.")
+            else:
+                st.error("Заполните все поля.")
+    
+    # ПРАВКА 2: Подвал обратной связи
+    st.markdown("---")
+    with st.expander("💬 Связь с разработчиком"):
+        st.write("Вы можете сказать спасибо:")
+        st.code("Реквизиты Т-Банк: +79058804440", language="text")
+    st.stop()
 
-# ==========================================
-# 3. СТРАНИЦА: МАСТЕР-ПАНЕЛЬ (ДЛЯ ТЕБЯ)
-# ==========================================
-elif st.session_state.page == "master_panel":
-    draw_header()
-    if st.button("➔ Вернуться в Главное Меню"):
-        st.session_state.page = "main_menu"
-        st.rerun()
+# --- ПРОВЕРКА АВАРИЙНОЙ СЕССИИ ПРИ ВХОДЕ (ПРАВКА 6) ---
+if "game_restored_checked" not in st.session_state:
+    if db.check_unfinished_game(st.session_state.user_phone):
+        st.warning("⚠️ У вас есть незавершенная игра (сессия активна в течение часа)!")
+        col_res1, col_res2 = st.columns(2)
+        if col_res1.button("Восстановить игру"):
+            db.load_local_backup()
+            st.session_state.game_restored_checked = True
+            st.rerun()
+        if col_res2.button("Начать заново"):
+            db.clear_local_backup()
+            st.session_state.game_restored_checked = True
+            st.rerun()
+        st.stop()
+    st.session_state.game_restored_checked = True
+
+# --- БОКОВАЯ ПАНЕЛЬ И ВЫХОД (ПРАВКА 6) ---
+with st.sidebar:
+    st.write(f"👤 Ведущий: **{st.session_state.user_phone}**")
+    if st.session_state.user_phone == st.secrets["MASTER_USER"]:
+        st.info("👑 Права Администратора")
         
-    st.markdown("## 👑 Панель Мастера управления платформой")
-    
-    t1, t2 = st.tabs(["🎮 Текущие и завершенные игры", "👥 База пользователей проекта"])
-    
-    with t1:
-        games_df = db.load_all_games()
-        if not games_df.empty:
-            now = int(time.time())
-            for _, g in games_df.iterrows():
-                status = g["status"]
-                # Проверка на зависшие игры (больше 1 часа неактивности)
-                if status == "yellow" and (now - int(g["last_update"])) > 3600:
-                    status = "red"
-                    
-                color_map = {"green": "🟢 Завершена", "yellow": "🟡 Идет сейчас", "red": "🔴 Зависла (>1ч)"}
-                st.markdown(f"#### {color_map.get(status, '⚪')} | Ведущий: {g['phone']} | Место: {g['venue']}")
-                
-                c1, c2 = st.columns([4, 1])
-                with c1:
-                    with st.expander("Посмотреть подробную структуру игры"):
-                        try: st.json(json.loads(g["full_json"]))
-                        except: st.write("Ошибка JSON")
-                with c2:
-                    if status in ["yellow", "red"]:
-                        if st.button("Наблюдать 👁️", key=f"obs_{g['game_id']}"):
-                            st.session_state.observing_json = g["full_json"]
-                            st.session_state.page = "observer_mode"
-                            st.rerun()
-                st.markdown("---")
-                
-    with t2:
-        st.dataframe(db.load_users(), use_container_width=True)
-
-elif st.session_state.page == "observer_mode":
-    draw_header()
-    if st.button("Выйти из режима наблюдения"):
-        st.session_state.page = "master_panel"
-        st.rerun()
-    st.info("👁️ Вы находитесь в режиме реального времени наблюдателя. Данные доступны только для чтения.")
-    try:
-        st.json(json.loads(st.session_state.observing_json))
-    except: st.error("Данные недоступны")
-
-# ==========================================
-# 4. ИГРА: НАСТРОЙКА ЗАВЕДЕНИЯ И ПАРАМЕТРОВ
-# ==========================================
-elif st.session_state.page == "game_setup_venue":
-    draw_header()
-    st.markdown("## ⚙️ Настройка новой игры")
-    
-    # 1. Блок Геолокации DaData
-    st.markdown("### 📍 Место проведения")
-    city_input = st.text_input("Введите город для поиска (например: Оренбург):")
-    cities_options = geo.get_cities(city_input)
-    chosen_city = st.selectbox("Выберите город из списка подходящих:", ["—"] + cities_options)
-    
-    venue_input = st.text_input("Название заведения (начните вводить):")
-    venue_options = geo.get_venues(chosen_city, venue_input) if chosen_city != "—" else []
-    
-    venue_display_names = [f"{v['name']} ({v['address']})" for v in venue_options] + ["📝 Свой вариант..."]
-    chosen_venue_idx = st.selectbox("Выберите заведение:", ["—"] + venue_display_names)
-    
-    if chosen_venue_idx == "📝 Свой вариант...":
-        final_venue_name = st.text_input("Введите название вручную:")
-        final_venue_address = st.text_input("Введите адрес вручную:")
-    elif chosen_venue_idx != "—":
-        v_data = venue_options[venue_display_names.index(chosen_venue_idx)]
-        final_venue_name = v_data["name"]
-        final_venue_address = v_data["address"]
-        st.success(f"Адрес подгружен: {final_venue_address}")
+    st.markdown("---")
+    if not st.session_state.logout_confirm:
+        if st.button("Выйти с аккаунта", use_container_width=True):
+            st.session_state.logout_confirm = True
+            st.rerun()
     else:
-        final_venue_name, final_venue_address = "—", "—"
-        
-    st.markdown("---")
+        st.error("Вы точно хотите выйти? Активная игра будет сброшена!")
+        c_out1, c_out2 = st.columns(2)
+        if c_out1.button("Да", key="confirm_yes"):
+            st.session_state.authenticated = False
+            st.session_state.user_phone = None
+            st.session_state.logout_confirm = False
+            if "remember_me_user" in st.session_state: del st.session_state.remember_me_user
+            st.rerun()
+        if c_out2.button("Нет", key="confirm_no"):
+            st.session_state.logout_confirm = False
+            st.rerun()
+
+# --- РЕНДЕРИНГ ЭКРАНОВ АДМИНА ИЛИ ИГРЫ ---
+if st.session_state.user_phone == st.secrets["MASTER_USER"] and st.session_state.page == "main_menu":
+    st.title("👑 Мастер-панель Управления")
+    t_m1, t_m2 = st.tabs(["👥 Пользователи", "🎲 История всех игр"])
     
-    # 2. Выбор играемых параметров
-    st.markdown("### 🎲 Выберите играемые параметры и коэффициенты")
-    
-    available_params = {
-        "Страна": 2, "Сорт винограда": 3, "Сладость": 2, 
-        "Выдержка": 3, "Моносортовое/Бленд": 2, "Год урожая": 4, "Процент алкоголя": 4
-    }
-    
-    chosen_params = []
-    custom_coeffs = {}
-    
-    c1, c2 = st.columns(2)
-    for idx, (param, def_coef) in enumerate(available_params.items()):
-        with (c1 if idx % 2 == 0 else c2):
-            is_checked = st.checkbox(param, value=(param in ["Страна", "Сорт винограда"]))
-            coef = st.slider(f"Коэффициент для: {param}", 2, 5, def_coef, key=f"coef_{param}")
-            if is_checked:
-                chosen_params.append(param)
-                custom_coeffs[param] = coef
+    with t_m1: # ПРАВКА 3: Профили и удаление пользователей
+        users = db.load_users()
+        if users.empty: st.write("База пуста")
+        for idx, r in users.iterrows():
+            with st.container():
+                col1, col2, col3 = st.columns([3, 2, 1])
+                col1.write(f"**{r['fio']}** ({r['phone']})")
+                if col2.button("📜 Профиль / Игры", key=f"p_{r['phone']}_{idx}"):
+                    st.session_state.view_profile_phone = r['phone']
+                if col3.button("🗑️", key=f"d_u_{r['phone']}_{idx}"):
+                    db.delete_user_from_db(r['phone'])
+                    st.success("Удален")
+                    st.rerun()
+                    
+        if "view_profile_phone" in st.session_state:
+            st.markdown(f"#### История игр ведущего {st.session_state.view_profile_phone}")
+            all_g = db.load_all_games()
+            if not all_g.empty:
+                filtered = all_g[all_g["phone"].astype(str) == str(st.session_state.view_profile_phone)]
+                st.dataframe(filtered[["date", "venue", "winner", "status"]] if not filtered.empty else "Игр нет")
+            if st.button("Закрыть профиль"):
+                del st.session_state.view_profile_phone
+                st.rerun()
                 
-    start_balance = st.number_input("Начальный баланс фишек для игроков:", min_value=50, value=150, step=50)
-    shuffle_players = st.checkbox("🔀 Перемешать всех участников перед стартом")
-    
-    if st.button("Перейти к регистрации участников ➔", use_container_width=True, type="primary"):
-        st.session_state.game_setup = {
-            "city": chosen_city, "venue_name": final_venue_name, "venue_address": final_venue_address,
-            "start_balance": start_balance, "shuffle_players": shuffle_players, "coeffs": custom_coeffs
-        }
-        st.session_state.active_params = chosen_params
-        st.session_state.page = "game_registration"
-        db.save_local_backup()
-        st.rerun()
+    with t_m2: # ПРАВКА 3: Удаление игр из базы
+        games = db.load_all_games()
+        if games.empty: st.write("Игр нет")
+        for idx, r in games.iterrows():
+            col_g1, col_g2 = st.columns([5, 1])
+            col_g1.write(f"📅 {r['date']} | 📍 {r['venue']} | 🏆 {r['winner']}")
+            if col_g2.button("❌", key=f"d_g_{r['game_id']}"):
+                db.delete_game_from_db(r['game_id'])
+                st.success("Удалено")
+                st.rerun()
+    st.stop()
 
-# ==========================================
-# 5. ИГРА: РЕГИСТРАЦИЯ УЧАСТНИКОВ В ЛОББИ
-# ==========================================
-elif st.session_state.page == "game_registration":
-    draw_header()
-    st.markdown("<h2 style='text-align: center;'>📝 Регистрация участников</h2>", unsafe_allow_html=True)
-    
-    if st.button("⬅️ Назад к настройкам заведения"):
-        st.session_state.page = "game_setup_venue"
+# --- ДВИЖОК ИГРЫ (ОСНОВНЫЕ СЦЕНАРИИ) ---
+if st.session_state.page == "main_menu":
+    st.title("🎲 Главное меню")
+    if st.button("🚀 Создать новую игру", use_container_width=True):
+        st.session_state.page = "setup_game"
+        st.session_state.game_setup = {"city": "", "venue_name": "", "players_count": 4}
+        st.session_state.players = []
         st.rerun()
         
-    with st.form("game_reg_form", clear_on_submit=True):
-        name = st.text_input("Имя игрока:")
-        if st.form_submit_button("Добавить", use_container_width=True) and name.strip():
-            p_num = len(st.session_state.players) + 1
-            st.session_state.players.append({
-                "id": p_num, "name": name.strip(), 
-                "balance": st.session_state.game_setup["start_balance"]
-            })
-            db.save_local_backup()
-            st.rerun()
-            
-    if st.session_state.players:
-        st.markdown("### Список участников (по часовой стрелке):")
-        for p in st.session_state.players:
-            st.write(f"Игрок №{p['id']}: **{p['name']}** | Баланс: {p['balance']} фишек")
-            
-        if st.button("Загадать вино раунда №1 ➔", use_container_width=True, type="primary"):
-            if st.session_state.game_setup["shuffle_players"]:
-                st.session_state.shuffle_order = random.sample(range(len(st.session_state.players)), len(st.session_state.players))
-            else:
-                st.session_state.shuffle_order = list(range(len(st.session_state.players)))
-            st.session_state.page = "game_wine_setup"
-            db.save_local_backup()
-            st.rerun()
-
-# ==========================================
-# 6. ИГРА: ВВОД ПАРАМЕТРОВ ВИНА РАУНДА
-# ==========================================
-elif st.session_state.page == "game_wine_setup":
-    draw_header()
-    st.markdown(f"## 🍷 Раунд №{st.session_state.round_num}")
-    
-    # Кнопка Шаг Назад
-    if st.button("⬅️ Назад (к регистрации/прошлому раунду)"):
-        if st.session_state.round_num == 1:
-            st.session_state.page = "game_registration"
+    st.subheader("📜 Ваши прошедшие игры")
+    games = db.load_all_games()
+    if not games.empty:
+        my_games = games[games["phone"].astype(str) == str(st.session_state.user_phone)]
+        if not my_games.empty:
+            st.dataframe(my_games[["date", "venue", "winner", "status"]])
         else:
-            # Откатываемся к результатам прошлого раунда
-            st.session_state.round_num -= 1
-            last_round_data = st.session_state.rounds_history.pop()
-            st.session_state.current_wine = last_round_data["wine"]
-            engine.calculate_balances()
-            st.session_state.page = "game_round_results"
-        db.save_local_backup()
-        st.rerun()
-        
-    st.markdown("#### Напишите название вина для автопоиска SimpleWine:")
-    wine_search = st.text_input("Название вина:")
-    if st.button("⚡ Заполнить параметры с сайта SimpleWine"):
-        parsed_data = parser.search_simplewine(wine_search)
-        if parsed_data:
-            st.session_state.current_wine = parsed_data
-            st.success(f"Найдено: {parsed_data['Название']}! Параметры подставлены.")
-        else:
-            st.error("Вино не найдено в каталоге, заполните параметры вручную.")
-            
-    st.markdown("### Свойства загаданного вина:")
-    
-    # Статические списки выбора
-    DATA_POOLS = {
-        "Сладость": ["сухое", "полусухое", "полусладкое", "сладкое"],
-        "Страна": ["Россия", "Франция", "Италия", "Испания", "ЮАР", "Австралия", "Аргентина", "США", "Новая Зеландия", "Чили", "Германия", "Австрия", "Португалия", "Грузия"],
-        "Сорт винограда": ["Шардоне", "Рислинг", "Совиньон Блан", "Пино Гриджио", "Каберне Совиньон", "Мерло", "Пино Нуар", "Сира/Шираз", "Мальбек", "Саперави", "Красностоп"],
-        "Выдержка": ["выдержано в дубе", "не выдержано в дубе", "выдержано на осадке"],
-        "Моносортовое/Бленд": ["моносортовое", "бленд"],
-        "Год урожая": [str(y) for y in range(2015, 2027)]
-    }
-    
-    # Динамически выводим только активные поля
-    for param in st.session_state.active_params:
-        if param == "Процент алкоголя":
-            old_val = st.session_state.current_wine.get(param, "13.0")
-            st.session_state.current_wine[param] = st.text_input("Процент алкоголя (например: 13.5):", value=old_val)
-        else:
-            pool = DATA_POOLS.get(param, [])
-            old_val = st.session_state.current_wine.get(param, "—")
-            
-            options = ["—"] + pool + ["📝 Свой вариант..."]
-            idx = options.index(old_val) if old_val in options else 0
-            sel = st.selectbox(f"{param}:", options, index=idx)
-            
-            if sel == "📝 Свой вариант...":
-                st.session_state.current_wine[param] = st.text_input(f"Введите свой вариант для '{param}':").strip()
-            else:
-                st.session_state.current_wine[param] = sel
-                
-    if st.button("Открыть прием ставок ➔", use_container_width=True, type="primary"):
-        st.session_state.page = "game_betting"
-        st.session_state.current_player_idx = 0
-        st.session_state.round_bets = {} # Очищаем сетку ставок под новый раунд
-        db.save_local_backup()
-        st.rerun()
+            st.info("Вы еще не проводили игры.")
 
-# ==========================================
-# 7. ИГРА: ПРИЕМ СТАВОК (КНОПКИ ТИПА ФИШЕК)
-# ==========================================
-elif st.session_state.page == "game_betting":
-    draw_header()
+elif st.session_state.page == "setup_game":
+    st.title("⚙️ Настройки мероприятия")
     
-    current_seat_idx = st.session_state.shuffle_order[st.session_state.current_player_idx]
-    player = st.session_state.players[current_seat_idx]
-    
-    st.markdown(f"## 👤 Прием ставок | Игрок №{player['id']}: {player['name']}")
-    
-    # Инициализация списка ставок игрока в раунде
-    p_key = str(player["id"])
-    if p_key not in st.session_state.round_bets:
-        st.session_state.round_bets[p_key] = [{"cat": "Страна", "val": "—", "amt": 0}]
-        
-    bets = st.session_state.round_bets[p_key]
-    spent = sum(b["amt"] for b in bets)
-    
-    st.markdown(f"### Доступно фишек: **{player['balance'] - spent}**")
-    
-    for i, b in enumerate(bets):
-        c1, c2, c3 = st.columns([2, 2, 3])
-        with c1:
-            b["cat"] = st.selectbox("Тип свойства", st.session_state.active_params, key=f"cat_{p_key}_{i}", index=st.session_state.active_params.index(b["cat"]) if b["cat"] in st.session_state.active_params else 0)
-        with c2:
-            # Подгружаем варианты
-            ans_val = st.session_state.current_wine.get(b["cat"], "—")
-            opts = ["—", ans_val] if ans_val != "—" else ["—"]
-            b["val"] = st.selectbox("Ставка игрока", opts, key=f"val_{p_key}_{i}")
-        with c3:
-            # Поле ввода + Быстрые кнопки фишек
-            b["amt"] = st.number_input("Сумма", min_value=0, step=10, key=f"amt_{p_key}_{i}", value=b["amt"])
+    # ПРАВКА 4 и 5: Ввод в одно поле DaData + сохранение состояния
+    c_val = st.text_input("Город проведения", value=st.session_state.game_setup.get("city", ""))
+    st.session_state.game_setup["city"] = c_val
+    if c_val:
+        sug_cities = geo.get_suggestions(c_val, "address")
+        if sug_cities: st.caption(f"💡 Подсказка: {', '.join(sug_cities)}")
             
-            # Ряд кнопок инкремента/декремента
-            bc1, bc2, bc3, bc4, bc5, bc6 = st.columns(6)
-            with bc1: 
-                if st.button("+10", key=f"p10_{p_key}_{i}"): b["amt"] += 10; st.rerun()
-            with bc2: 
-                if st.button("+50", key=f"p50_{p_key}_{i}"): b["amt"] += 50; st.rerun()
-            with bc3: 
-                if st.button("+100", key=f"p100_{p_key}_{i}"): b["amt"] += 100; st.rerun()
-            with bc4: 
-                if st.button("-10", key=f"m10_{p_key}_{i}"): b["amt"] = max(0, b["amt"] - 10); st.rerun()
-            with bc5: 
-                if st.button("-50", key=f"m50_{p_key}_{i}"): b["amt"] = max(0, b["amt"] - 50); st.rerun()
-            with bc6: 
-                if st.button("-100", key=f"m100_{p_key}_{i}"): b["amt"] = max(0, b["amt"] - 100); st.rerun()
-                
-    if st.button("➕ Добавить еще одну строку ставки", use_container_width=True):
-        st.session_state.round_bets[p_key].append({"cat": "Страна", "val": "—", "amt": 0})
-        st.rerun()
-        
-    st.markdown("---")
-    if st.button("Принять ставки игрока ➔", type="primary", use_container_width=True):
-        if st.session_state.current_player_idx < len(st.session_state.players) - 1:
-            st.session_state.current_player_idx += 1
-            st.rerun()
-        else:
-            # Все игроки сделали ставки -> Переходим к расчету раунда
-            st.session_state.rounds_history.append({
-                "wine": st.session_state.current_wine,
-                "bets": st.session_state.round_bets
-            })
-            engine.calculate_balances()
-            st.session_state.page = "game_round_results"
-            db.save_local_backup()
-            st.rerun()
-
-# ==========================================
-# 8. ИГРА: ИТОГИ РАУНДА (С ВОЗМОЖНОСТЬЮ ОТКАТА)
-# ==========================================
-elif st.session_state.page == "game_round_results":
-    draw_header()
-    st.markdown(f"## 📊 Итоги Раунда №{st.session_state.round_num}")
+    v_val = st.text_input("Название заведения", value=st.session_state.game_setup.get("venue_name", ""))
+    st.session_state.game_setup["venue_name"] = v_val
     
-    correct = st.session_state.current_wine
-    display_answers = [f"**{k}**: {v}" for k, v in correct.items() if v != "—"]
-    st.info("🎯 Правильные параметры вина: " + " | ".join(display_answers))
+    p_count = st.number_input("Количество участников", min_value=1, max_value=30, value=st.session_state.game_setup.get("players_count", 4))
+    st.session_state.game_setup["players_count"] = p_count
     
-    # Выводим детализацию раунда
-    last_round_bets = st.session_state.rounds_history[-1]["bets"]
-    
-    for p in sorted(st.session_state.players, key=lambda x: x['id']):
-        p_bets = last_round_bets.get(str(p["id"]), [])
-        details = []
-        win_sum = 0
-        
-        for b in p_bets:
-            ans = str(correct.get(b["cat"])).lower().strip()
-            val = str(b["val"]).lower().strip()
-            
-            if b["cat"] == "Процент алкоголя":
-                try: hit = abs(float(val) - float(ans)) <= 0.5
-                except: hit = False
-            else:
-                hit = (val == ans and val != "—")
-                
-            res = b["amt"] * st.session_state.game_setup["coeffs"].get(b["cat"], 2) if hit else 0
-            win_sum += res
-            details.append(f"<p style='color:{'#28a745' if hit else '#dc3545'}; margin:0;'>{'✅' if hit else '❌'} {b['cat']}: {b['val']} | {b['amt']} фишек ➔ Выигрыш: {res}</p>")
-            
-        with st.expander(f"👤 Игрок №{p['id']}: {p['name']} | Финальный баланс фишек: {p['balance']}"):
-            st.markdown("".join(details) or "Ставок не было", unsafe_allow_html=True)
-            
-    st.markdown("---")
-    
-    c1, c2 = st.columns(2)
-    with c1:
-        if st.button("🍷 Перейти к следующему раунду", use_container_width=True, type="primary"):
-            st.session_state.round_num += 1
-            st.session_state.current_wine = {}
-            st.session_state.page = "game_wine_setup"
-            db.save_local_backup()
-            st.rerun()
-    with c2:
-        if st.button("⬅️ Изменить ставки/параметры этого раунда"):
-            # Удаляем последний раунд из истории, возвращаем на этап ввода вина
-            st.session_state.rounds_history.pop()
-            engine.calculate_balances()
-            st.session_state.page = "game_wine_setup"
-            db.save_local_backup()
-            st.rerun()
-            
-    st.markdown("---")
-    with st.popover("🚫 Завершить всю игру и подвести итоги", use_container_width=True):
-        st.warning("Вы уверены, что хотите полностью закончить сессию казино?")
-        if st.button("Да, подтверждаю финал", use_container_width=True, type="primary"):
-            st.session_state.page = "final"
-            db.save_local_backup()
-            st.rerun()
-
-# ==========================================
-# 9. ИГРА: ФИНАЛЬНЫЕ ИТОГИ И СОХРАНЕНИЕ
-# ==========================================
-elif st.session_state.page == "final":
-    draw_header()
-    st.markdown("<h1 style='text-align: center;'>🏆 Финал Игры</h1>", unsafe_allow_html=True)
-    
-    # Сортируем лидеров
-    leaders = sorted(st.session_state.players, key=lambda x: x['balance'], reverse=True)
-    winner_name = leaders[0]["name"] if leaders else "Нет игроков"
-    
-    for i, p in enumerate(leaders):
-        st.markdown(f"### **{i+1}. {p['name']}** — {p['balance']} фишек")
-        
-    # Сохраняем финальные данные в Облако Google Таблиц
-    setup = st.session_state.game_setup
-    db.save_game_to_db({
-        "game_id": st.session_state.game_id,
-        "phone": st.session_state.user_phone,
-        "date": time.strftime("%Y-%m-%d %H:%M"),
-        "venue": f"{setup.get('city','')}, {setup.get('venue_name','')}",
-        "winner": winner_name,
-        "status": "green", # Помечаем зеленым в мастере
-        "full_json": json.dumps({
-            "setup": setup,
-            "players": st.session_state.players,
-            "history": st.session_state.rounds_history
-        }, ensure_ascii=False),
-        "last_update": int(time.time())
-    })
-    
-    db.clear_local_backup() # Стираем локальный бэкап, игра успешно сохранена в архивах
-    
-    if st.button("🔄 Выйти в Главное Меню", use_container_width=True, type="primary"):
+    col_nav1, col_nav2 = st.columns(2)
+    if col_nav1.button("⬅️ В меню"):
         st.session_state.page = "main_menu"
+        st.rerun()
+    if col_nav2.button("Далее ➡️"):
+        st.session_state.page = "players_reg"
+        st.rerun()
+
+elif st.session_state.page == "players_reg":
+    st.title("👥 Регистрация игроков")
+    count = st.session_state.game_setup["players_count"]
+    
+    # Восстановление имен, если вернулись назад (ПРАВКА 5)
+    if not st.session_state.players:
+        st.session_state.players = [{"name": f"Игрок {i+1}", "balance": 500} for i in range(count)]
+        
+    for i in range(count):
+        p_name = st.text_input(f"Имя игрока №{i+1}", value=st.session_state.players[i]["name"], key=f"p_init_name_{i}")
+        st.session_state.players[i]["name"] = p_name
+        
+    col_p1, col_p2 = st.columns(2)
+    if col_p1.button("⬅️ Назад"):
+        st.session_state.page = "setup_game"
+        st.rerun()
+    if col_p2.button("Начать игру 🎰"):
+        st.session_state.game_id = str(int(time.time()))
+        st.session_state.round_num = 1
+        st.session_state.rounds_history = {}
+        st.session_state.page = "wine_params"
+        db.save_local_backup()
+        st.rerun()
+
+elif st.session_state.page == "wine_params":
+    st.title(f"🍷 Раунд {st.session_state.round_num}: Параметры Вина")
+    
+    # ПРАВКА 13: Восстановление имени вина при шаге назад
+    if f"round_{st.session_state.round_num}" not in st.session_state.rounds_history:
+        st.session_state.rounds_history[f"round_{st.session_state.round_num}"] = {
+            "name": "", "country": "Россия", "grape": "Шардоне", "alc": 12.0
+        }
+    
+    r_data = st.session_state.rounds_history[f"round_{st.session_state.round_num}"]
+    
+    w_name = st.text_input("Название / этикетка вина", value=r_data["name"])
+    w_country = st.selectbox("Правильная страна", options=ALL_COUNTRIES, index=ALL_COUNTRIES.index(r_data["country"]) if r_data["country"] in ALL_COUNTRIES else 0)
+    w_grape = st.selectbox("Правильный сорт", options=ALL_GRAPES, index=ALL_GRAPES.index(r_data["grape"]) if r_data["grape"] in ALL_GRAPES else 0)
+    
+    # ПРАВКА 12: Числовой ввод алкоголя эталона
+    w_alc = st.number_input("Правильный процент алкоголя (%)", min_value=0.0, max_value=25.0, value=r_data["alc"], step=0.1)
+    
+    # Сохраняем в историю раунда
+    st.session_state.rounds_history[f"round_{st.session_state.round_num}"] = {
+        "name": w_name, "country": w_country, "grape": w_grape, "alc": w_alc
+    }
+    
+    if st.button("Перейти к ставкам ➡️", use_container_width=True):
+        st.session_state.page = "bets_page"
+        db.save_local_backup()
+        st.rerun()
+
+elif st.session_state.page == "bets_page":
+    st.title(f"🎰 Прием ставок — Раунд {st.session_state.round_num}")
+    
+    # ПРАВКА 8: Навигация назад к вводу вина
+    if st.button("⬅️ Исправить параметры вина"):
+        st.session_state.page = "wine_params"
+        st.rerun()
+        
+    st.markdown("---")
+    
+    # ПРАВКА 10: Убрана кнопка "Добавить строку" — строки идут автоматически по игрокам
+    for idx, p in enumerate(st.session_state.players):
+        st.write(f"👤 **{p['name']}** (Доступный баланс: {p['balance']} фишек)")
+        
+        # Восстановление старой ставки игрока, если прыгаем назад-вперед (ПРАВКА 13)
+        b_val_key = f"bet_val_{p['name']}_{st.session_state.round_num}"
+        b_country_key = f"bet_country_{p['name']}_{st.session_state.round_num}"
+        b_grape_key = f"bet_grape_{p['name']}_{st.session_state.round_num}"
+        b_alc_key = f"bet_alc_{p['name']}_{st.session_state.round_num}"
+        
+        if b_val_key not in st.session_state: st.session_state[b_val_key] = 50
+        if b_country_key not in st.session_state: st.session_state[b_country_key] = ALL_COUNTRIES[0]
+        if b_grape_key not in st.session_state: st.session_state[b_grape_key] = ALL_GRAPES[0]
+        if b_alc_key not in st.session_state: st.session_state[b_alc_key] = 12.0
+            
+        # ПРАВКА 11: Кнопки фишек слева(-) и справа(+) от ввода ставки
+        col_m, col_i, col_p = st.columns([1, 2, 1])
+        
+        if col_m.button("➖ 50", key=f"m_{idx}"):
+            st.session_state[b_val_key] = max(0, st.session_state[b_val_key] - 50)
+            st.rerun()
+            
+        chosen_bet = col_i.number_input("Сумма фишек", min_value=0, max_value=int(p['balance']), value=int(st.session_state[b_val_key]), key=f"num_{idx}")
+        st.session_state[b_val_key] = chosen_bet
+        
+        if col_p.button("➕ 50", key=f"p_{idx}"):
+            st.session_state[b_val_key] = min(int(p['balance']), st.session_state[b_val_key] + 50)
+            st.rerun()
+            
+        # Поля выбора ставок игроков по глобальным справочникам (ПРАВКА 9)
+        st.session_state[b_country_key] = st.selectbox("Ставка на Страну", options=ALL_COUNTRIES, key=f"c_{idx}", index=ALL_COUNTRIES.index(st.session_state[b_country_key]))
+        st.session_state[b_grape_key] = st.selectbox("Ставка на Сорт", options=ALL_GRAPES, key=f"g_{idx}", index=ALL_GRAPES.index(st.session_state[b_grape_key]))
+        
+        # ПРАВКА 12: Свободный ввод алкоголя игроком
+        st.session_state[b_alc_key] = st.number_input("Ставка на % алкоголя", min_value=0.0, max_value=20.0, step=0.1, value=float(st.session_state[b_alc_key]), key=f"a_{idx}")
+        st.markdown("---")
+        
+    if st.button("📊 Рассчитать итоги раунда", use_container_width=True):
+        st.session_state.page = "round_results"
+        db.save_local_backup()
+        st.rerun()
+
+elif st.session_state.page == "round_results":
+    st.title(f"📊 Итоги раунда {st.session_state.round_num}")
+    
+    target = st.session_state.rounds_history[f"round_{st.session_state.round_num}"]
+    
+    st.write(f"🟢 **Правильный ответ:** {target['name']} ({target['country']}, {target['grape']}, {target['alc']}% )")
+    
+    results_table = []
+    
+    # Подсчет результатов (выполняется один раз при переходе на экран)
+    for p in st.session_state.players:
+        b_val = st.session_state.get(f"bet_val_{p['name']}_{st.session_state.round_num}", 0)
+        b_country = st.session_state.get(f"bet_country_{p['name']}_{st.session_state.round_num}", "")
+        b_grape = st.session_state.get(f"bet_grape_{p['name']}_{st.session_state.round_num}", "")
+        b_alc = st.session_state.get(f"bet_alc_{p['name']}_{st.session_state.round_num}", 0.0)
+        
+        # Вычисление попадания
+        win_coef = 0
+        hit_details = []
+        if b_country == target["country"]: 
+            win_coef += 2
+            hit_details.append("Страна (x2)")
+        if b_grape == target["grape"]: 
+            win_coef += 3
+            hit_details.append("Сорт (x3)")
+        if abs(float(b_alc) - float(target["alc"])) <= 0.5: # ПРАВКА 12: погрешность ±0.5
+            win_coef += 2
+            hit_details.append("Алкоголь (x2)")
+            
+        if win_coef > 0:
+            win_amount = b_val * win_coef
+            p["balance"] += win_amount
+            status_text = f"🎉 Сыграла: {', '.join(hit_details)}"
+            p_payout = win_amount
+        else:
+            p["balance"] -= b_val
+            status_text = "❌ Не сыграла" # ПРАВКА 14: Отображение проигравших
+            p_payout = -b_val
+            
+        results_table.append({
+            "Игрок": p["name"],
+            "Ставка": b_val,
+            "Прогноз": f"{b_country} / {b_grape} / {b_alc}%",
+            "Статус": status_text,
+            "Баланс": p["balance"]
+        })
+        
+    st.table(pd.DataFrame(results_table))
+    
+    col_r1, col_r2 = st.columns(2)
+    if col_r1.button("⬅️ Назад к ставкам"): # ПРАВКА 8
+        st.session_state.page = "bets_page"
+        st.rerun()
+        
+    if col_r2.button("Следующий раунд ➡️"):
+        st.session_state.round_num += 1
+        st.session_state.page = "wine_params"
+        db.save_local_backup()
+        st.rerun()
+        
+    if st.button("🏁 Завершить всю игру и сохранить", use_container_width=True):
+        # Определение победителя
+        best_player = max(st.session_state.players, key=lambda x: x["balance"])
+        
+        # ПРАВКА 15: Отправка и сохранение игры в историю базы Гугл Таблиц
+        game_result_data = {
+            "game_id": str(st.session_state.game_id),
+            "phone": str(st.session_state.user_phone),
+            "date": time.strftime("%Y-%m-%d %H:%M"),
+            "venue": f"{st.session_state.game_setup['city']}, {st.session_state.game_setup['venue_name']}",
+            "winner": str(best_player["name"]),
+            "status": "Завершена",
+            "full_json": json.dumps(st.session_state.players, ensure_ascii=False),
+            "last_update": int(time.time())
+        }
+        db.save_game_to_db(game_result_data)
+        db.clear_local_backup() # Удаляем бэкап, так как игра успешно закрыта
+        
+        st.session_state.page = "main_menu"
+        st.success("Игра сохранена в облако!")
+        time.sleep(1.5)
         st.rerun()
