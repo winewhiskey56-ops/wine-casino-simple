@@ -1,6 +1,7 @@
 import streamlit as st
 from streamlit_searchbox import st_searchbox
-from streamlit_connections import GSheetsConnection
+# Встроенный в современный Streamlit импорт для работы с Google Таблицами:
+from streamlit.connections import GSheetsConnection 
 import pandas as pd
 import json
 import os
