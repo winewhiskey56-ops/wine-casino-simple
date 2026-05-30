@@ -1,24 +1,74 @@
 import streamlit as st
-from streamlit_searchbox import st_searchbox
 import pandas as pd
 import json
 import os
 import time
+import gspread
+from google.oauth2.service_account import Credentials
 
-# Правильный и чистый импорт коннектора таблиц
-try:
-    from st_gsheets_connection import GSheetsConnection
-except ImportError:
-    from streamlit.connections import GSheetsConnection
+# --- ИНИЦИАЛИЗАЦИЯ И ПОДКЛЮЧЕНИЕ К GOOGLE SHEETS ---
+@st.cache_resource
+def get_gspread_client():
+    # Собираем учетные данные прямо из secrets (блок connections.gsheets)
+    creds_dict = {
+        "type": st.secrets["connections"]["gsheets"]["type"],
+        "project_id": st.secrets["connections"]["gsheets"]["project_id"],
+        "private_key_id": st.secrets["connections"]["gsheets"]["private_key_id"],
+        "private_key": st.secrets["connections"]["gsheets"]["private_key"],
+        "client_email": st.secrets["connections"]["gsheets"]["client_email"],
+        "client_id": st.secrets["connections"]["gsheets"]["client_id"],
+        "auth_uri": st.secrets["connections"]["gsheets"]["auth_uri"],
+        "token_uri": st.secrets["connections"]["gsheets"]["token_uri"],
+        "auth_provider_x509_cert_url": st.secrets["connections"]["gsheets"]["auth_provider_x509_cert_url"],
+        "client_x509_cert_url": st.secrets["connections"]["gsheets"]["client_x509_cert_url"]
+    }
+    
+    scopes = ["https://www.googleapis.com/auth/spreadsheets"]
+    creds = Credentials.from_service_account_info(creds_dict, scopes=scopes)
+    return gspread.authorize(creds)
 
-DB_CONN = st.connection("gsheets", type=GSheetsConnection)
-SHEET_URL = st.secrets["SPREADSHEET_URL"]
+def get_worksheet_df(sheet_name: str):
+    """Вспомогательная функция для быстрого чтения листа в DataFrame"""
+    try:
+        gc = get_gspread_client()
+        # Открываем по ссылке из secrets
+        sh = gc.open_by_url(st.secrets["SPREADSHEET_URL"])
+        worksheet = sh.worksheet(sheet_name)
+        data = worksheet.get_all_records()
+        if not data:
+            return pd.DataFrame()
+        return pd.DataFrame(data)
+    except Exception as e:
+        # Если листа нет или он пустой, возвращаем пустой DataFrame
+        return pd.DataFrame()
+
+def update_worksheet_from_df(sheet_name: str, df: pd.DataFrame):
+    """Вспомогательная функция для полной перезаписи листа данными из DataFrame"""
+    try:
+        gc = get_gspread_client()
+        sh = gc.open_by_url(st.secrets["SPREADSHEET_URL"])
+        
+        # Пытаемся открыть лист, если его нет — создаем
+        try:
+            worksheet = sh.worksheet(sheet_name)
+        except gspread.exceptions.WorksheetNotFound:
+            worksheet = sh.add_worksheet(title=sheet_name, rows="100", cols="20")
+            
+        worksheet.clear()
+        # gspread требует список списков, включая заголовки
+        df_filled = df.fillna("")
+        data_to_save = [df_filled.columns.values.tolist()] + df_filled.values.tolist()
+        worksheet.update(data_to_save)
+    except Exception as e:
+        st.error(f"Ошибка сохранения в Google Таблицу: {e}")
+
+# --- БИЗНЕС-ЛОГИКА ПРИЛОЖЕНИЯ ---
 
 def load_users():
-    try:
-        return DB_CONN.read(spreadsheet=SHEET_URL, worksheet="Users", ttl=5)
-    except:
+    df = get_worksheet_df("Users")
+    if df.empty or "phone" not in df.columns:
         return pd.DataFrame(columns=["fio", "phone", "password"])
+    return df
 
 def save_user(fio, phone, password):
     df = load_users()
@@ -26,28 +76,23 @@ def save_user(fio, phone, password):
         return False
     new_user = pd.DataFrame([{"fio": fio, "phone": str(phone), "password": str(password)}])
     updated_df = pd.concat([df, new_user], ignore_index=True)
-    DB_CONN.update(spreadsheet=SHEET_URL, worksheet="Users", data=updated_df)
+    update_worksheet_from_df("Users", updated_df)
     return True
 
 def save_game_to_db(game_data):
-    try:
-        df = DB_CONN.read(spreadsheet=SHEET_URL, worksheet="Games", ttl=0)
-    except:
+    df = get_worksheet_df("Games")
+    if df.empty or "game_id" not in df.columns:
         df = pd.DataFrame(columns=["game_id", "phone", "date", "venue", "winner", "status", "full_json", "last_update"])
     
     new_row = pd.DataFrame([game_data])
-    # Убираем старую запись этой же игры, если она обновляется
     if not df.empty and game_data["game_id"] in df["game_id"].values:
         df = df[df["game_id"] != game_data["game_id"]]
         
     updated_df = pd.concat([df, new_row], ignore_index=True)
-    DB_CONN.update(spreadsheet=SHEET_URL, worksheet="Games", data=updated_df)
+    update_worksheet_from_df("Games", updated_df)
 
 def load_all_games():
-    try:
-        return DB_CONN.read(spreadsheet=SHEET_URL, worksheet="Games", ttl=0)
-    except:
-        return pd.DataFrame()
+    return get_worksheet_df("Games")
 
 # --- ЛОКАЛЬНЫЕ ИЗОЛИРОВАННЫЕ СЕССИИ ДЛЯ КАЖДОГО ВЕДУЩЕГО ---
 def get_backup_path():
@@ -60,14 +105,12 @@ def save_local_backup():
     for k in keys_to_save:
         if k in st.session_state: state[k] = st.session_state[k]
     
-    # Сохраняем динамические ключи элементов ввода ставок
     dynamic_keys = {k: st.session_state[k] for k in st.session_state.keys() if any(x in k for x in ["_v", "_a", "_c"])}
     state["dynamic_keys"] = dynamic_keys
     
     with open(get_backup_path(), "w", encoding="utf-8") as f:
         json.dump(state, f, ensure_ascii=False, indent=4)
         
-    # Дублируем статус "Идет сейчас" в облачную Google Таблицу для Мастер-аккаунта
     if st.session_state.get("page") not in ["registration", "main_menu", "final"]:
         setup = st.session_state.get("game_setup", {})
         save_game_to_db({
