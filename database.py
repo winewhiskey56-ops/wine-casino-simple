@@ -1,7 +1,12 @@
 import streamlit as st
 from streamlit_searchbox import st_searchbox
-# Встроенный в современный Streamlit импорт для работы с Google Таблицами:
-from streamlit.connections import GSheetsConnection 
+# Стабильный и проверенный импорт из официального плагина:
+from strikers_gsheets_connection import GSheetsConnection if False else None
+try:
+    from st_gsheets_connection import GSheetsConnection
+except ImportError:
+    from streamlit.connections import GSheetsConnection
+
 import pandas as pd
 import json
 import os
