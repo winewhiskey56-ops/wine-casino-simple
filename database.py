@@ -9,12 +9,23 @@ from google.oauth2.service_account import Credentials
 # --- ИНИЦИАЛИЗАЦИЯ И ПОДКЛЮЧЕНИЕ К GOOGLE SHEETS ---
 @st.cache_resource
 def get_gspread_client():
-    # Собираем учетные данные прямо из secrets (блок connections.gsheets)
+    # Извлекаем приватный ключ и принудительно чистим его синтаксис
+    raw_key = st.secrets["connections"]["gsheets"]["private_key"]
+    
+    # Исправляем возможные проблемы с переносами строк (\n)
+    if "\\n" in raw_key:
+        clean_key = raw_key.replace("\\n", "\n")
+    else:
+        clean_key = raw_key
+
+    # Убираем случайные лишние пробелы по краям, которые могли скопироваться
+    clean_key = clean_key.strip()
+
     creds_dict = {
         "type": st.secrets["connections"]["gsheets"]["type"],
         "project_id": st.secrets["connections"]["gsheets"]["project_id"],
         "private_key_id": st.secrets["connections"]["gsheets"]["private_key_id"],
-        "private_key": st.secrets["connections"]["gsheets"]["private_key"],
+        "private_key": clean_key,  # Передаем очищенный ключ
         "client_email": st.secrets["connections"]["gsheets"]["client_email"],
         "client_id": st.secrets["connections"]["gsheets"]["client_id"],
         "auth_uri": st.secrets["connections"]["gsheets"]["auth_uri"],
